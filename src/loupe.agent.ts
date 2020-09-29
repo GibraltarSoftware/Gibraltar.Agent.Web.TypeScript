@@ -1,13 +1,14 @@
+import * as clientPlatform from 'platform';
+import * as StackTrace from 'stacktrace-js';
 
-import clientPlatform = require('platform');
-import stackTrace = require('stacktrace-js');
-
+import { Exception } from './exception';
+import { Header } from './Header';
 import { ILocalPlatform } from './LocalPlatform';
 import { LocalStorageMessage } from './localStorageMessage';
 import { LogMessageSeverity } from './LogMessageSeverity';
 import { MethodSourceInfo } from './MethodSourceInfo';
 
-export class Loupe {
+export class LoupeAgent {
   public propagateError = false;
 
   private maxRequestSize = 204800;
@@ -22,13 +23,14 @@ export class Loupe {
   private storageFull = false;
   private corsOrigin: string | null = null;
   private globalKeyList: string[] = [];
-  private authHeader!: any;
+  private authHeader!: Header;
 
 
-  constructor() {
-    if (typeof window !== 'undefined' && typeof window.onerror !== 'undefined') {
-      this.existingOnError = window.onerror;
-      this.setUpOnError(window);
+  constructor(private readonly window: any, private readonly document: any) {
+    // TODO - this requirement of window needs to be abstracted out, since it's not available in node
+    if (typeof this.window !== 'undefined' && typeof this.window.onerror !== 'undefined') {
+      this.existingOnError = this.window.onerror;
+      this.setUpOnError(this.window);
     }
     
     this.setUpClientSessionId();
@@ -45,7 +47,7 @@ export class Loupe {
     exception?: any | null,
     details?: any | null,
     methodSourceInfo?: MethodSourceInfo | null,
-  ) {
+  ): void {
     this.write(
       LogMessageSeverity.verbose,
       category,
@@ -65,7 +67,7 @@ export class Loupe {
     exception?: any | null,
     details?: any | null,
     methodSourceInfo?: MethodSourceInfo | null,
-  ) {
+  ): void {
     this.write(
       LogMessageSeverity.information,
       category,
@@ -85,7 +87,7 @@ export class Loupe {
     exception?: any | null,
     details?: any | null,
     methodSourceInfo?: MethodSourceInfo | null,
-  ) {
+  ): void {
     this.write(
       LogMessageSeverity.warning,
       category,
@@ -105,7 +107,7 @@ export class Loupe {
     exception?: any | null,
     details?: any | null,
     methodSourceInfo?: MethodSourceInfo | null,
-  ) {
+  ): void {
     this.write(
       LogMessageSeverity.error,
       category,
@@ -125,7 +127,7 @@ export class Loupe {
     exception?: any | null,
     details?: any | null,
     methodSourceInfo?: MethodSourceInfo | null,
-  ) {
+  ): void {
     this.write(
       LogMessageSeverity.critical,
       category,
@@ -147,7 +149,8 @@ export class Loupe {
     exception?: any | null,
     details?: any | null,
     methodSourceInfo?: MethodSourceInfo | null,
-  ) {
+  ): void {
+    console.log("writing", caption);
     exception = this.sanitiseArgument(exception);
     details = this.sanitiseArgument(details);
 
@@ -166,22 +169,24 @@ export class Loupe {
     this.addSendMessageCommandToEventQueue();
   }
 
-  public addSendMessageCommandToEventQueue() {
+  public addSendMessageCommandToEventQueue(): void {
+    console.log("addSendMessageCommandToEventQueue: adding to queue");
     // check for unsent messages on start up
     if ((this.storageAvailable && localStorage.length) || this.messageStorage.length) {
-      setTimeout(this.logMessageToServer, this.messageInterval);
+      console.log("addSendMessageCommandToEventQueue: setting timer to log");
+      setTimeout(() => this.logMessageToServer(), this.messageInterval);
     }
   }
 
-  public setSessionId(value: string) {
+  public setSessionId(value: string): void {
     this.sessionId = value;
   }
 
-  public setCORSOrigin(value: string | null) {
+  public setCORSOrigin(value: string | null): void {
     this.corsOrigin = value;
   }
 
-  public setAuthorizationHeader(header: any) {
+  public setAuthorizationHeader(header: Header): void {
     if (header) {
       if (header.name && header.value) {
         this.authHeader = header;
@@ -195,15 +200,12 @@ export class Loupe {
     }
   }
 
-  public clientSessionHeader() {
-    return {
-      headerName: 'loupe-agent-sessionId',
-      headerValue: this.agentSessionId,
-    };
+  public clientSessionHeader(): Header {
+    return new Header('loupe-agent-sessionId', this.agentSessionId);
   }
 
   
-  public resetMessageInterval(interval: number) {
+  public resetMessageInterval(interval: number): void {
     let newInterval = interval || 10;
 
     if (newInterval < 10) {
@@ -216,7 +218,7 @@ export class Loupe {
   }
 
 
-  private storageSupported() {
+  private storageSupported(): boolean {
     const testValue = '_loupe_storage_test_';
 
     try {
@@ -228,7 +230,7 @@ export class Loupe {
     }
   }
 
-  private sanitiseArgument(parameter: any) {
+  private sanitiseArgument(parameter: any): any {
     if (typeof parameter === 'undefined') {
       return null;
     }
@@ -240,18 +242,20 @@ export class Loupe {
     return new MethodSourceInfo(data.file || null, data.method || null, data.line || null, data.column || null);
   }
 
-  private setUpOnError(window: Window) {
-    if (typeof window.onerror === 'undefined') {
+  private setUpOnError(window: Window): void {
+    // TODO - abstract to a higher level "browser logger" ?
+    
+    if (typeof this.window.onerror === 'undefined') {
       this.consoleLog('Gibraltar Loupe JavaScript Logger: No onerror event; errors cannot be logged to Loupe');
       return;
     }
 
-    window.onerror = (msg, url, line, column, error) => {
+    this.window.onerror = (msg: string | Event, url: string | undefined, line: number | undefined, column: number | undefined, error: Error | undefined) => {
       if (this.existingOnError) {
         this.existingOnError.apply(this, [msg, url, line, column, error]);
       }
 
-      setTimeout(this.logError, 10, msg, url, line, column, error);
+      setTimeout(() => this.logError, 10, msg, url, line, column, error);
 
       // if we want to propagate the error the browser needs
       // us to return false but logically we want to state we
@@ -261,18 +265,19 @@ export class Loupe {
     };
   }
 
-  private getPlatform() {
+  private getPlatform(): ILocalPlatform {
     const platformDetails = clientPlatform as ILocalPlatform;
 
+    // TODO - document needs to be injected (or abstracted to a higher level)
     platformDetails.size = {
-      height: window.innerHeight || document.body.clientHeight,
-      width: window.innerWidth || document.body.clientWidth
+      height: this.window.innerHeight || this.document.body.clientHeight,
+      width: this.window.innerWidth || this.document.body.clientWidth
     };
 
     return platformDetails;
   }
 
-  private getStackTrace(error: any, errorMessage: string) {
+  private getStackTrace(error: any, errorMessage: string): any[] {
     if (typeof error === 'undefined' || error === null || !error.stack) {
       return this.createStackFromMessage(errorMessage);
     }
@@ -281,9 +286,9 @@ export class Loupe {
   }
 
   private createStackFromMessage(errorMessage: string) {
-    if (stackTrace) {
+    if (StackTrace) {
       try {
-        return stackTrace.fromError(new Error(errorMessage)).then(stack => {
+        StackTrace.fromError(new Error(errorMessage)).then((stack:any) => {
           return this.stripLoupeStackFrames(stack.reverse());
         });
       } catch (e) {
@@ -293,7 +298,7 @@ export class Loupe {
     return [];
   }
 
-  private createStackFromError(error: any) {
+  private createStackFromError(error: any): any[] {
     // remove trailing new line
     if (error.stack.substring(error.stack.length - 1) === '\n') {
       error.stack = error.stack.substring(0, error.stack.length - 1);
@@ -302,7 +307,7 @@ export class Loupe {
     return error.stack.split('\n');
   }
 
-  private stripLoupeStackFrames(stack: stackTrace.StackFrame[]) {
+  private stripLoupeStackFrames(stack: StackTrace.StackFrame[]) : StackTrace.StackFrame[] {
     // if we error is from a simple throw statement and not an error then
     // stackTrace.js will have added methods from here so we need to remove
     // them otherwise they will be reported in Loupe
@@ -318,7 +323,7 @@ export class Loupe {
     return stack;
   }
 
-  private userFramesStartAt(stack: stackTrace.StackFrame[]) {
+  private userFramesStartAt(stack: StackTrace.StackFrame[]): number {
     const loupeMethods = ['logError', 'getStackTrace', 'createStackFromMessage', 'createStackTrace'];
     let position = 0;
 
@@ -345,7 +350,7 @@ export class Loupe {
     return position;
   }
 
-  private logError(msg: string, url: string, line: number, column: number, error: any) {
+  private logError(msg: string, url: string, line: number, column: number, error: any): boolean {
     let errorName = '';
 
     if (error) {
@@ -366,7 +371,7 @@ export class Loupe {
     return this.logMessageToServer();
   }
 
-  private checkForStorageQuotaReached(e: any) {
+  private checkForStorageQuotaReached(e: any): boolean {
     if (e.name === 'QUOTA_EXCEEDED_ERR' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.name === 'QuotaExceededError') {
       this.storageFull = true;
       return true;
@@ -375,7 +380,7 @@ export class Loupe {
     return false;
   }
 
-  private setUpClientSessionId() {
+  private setUpClientSessionId(): void {
     const currentClientSessionId = this.getClientSessionHeader();
 
     if (currentClientSessionId) {
@@ -386,7 +391,7 @@ export class Loupe {
     }
   }
 
-  private storeClientSessionId(sessionIdToStore: string) {
+  private storeClientSessionId(sessionIdToStore: string): void {
     if (this.storageAvailable && !this.storageFull) {
       try {
         sessionStorage.setItem('LoupeAgentSessionId', sessionIdToStore);
@@ -400,7 +405,7 @@ export class Loupe {
     }
   }
 
-  private getClientSessionHeader() {
+  private getClientSessionHeader(): string | null {
     try {
       const clientSessionId = sessionStorage.getItem('LoupeAgentSessionId');
       if (clientSessionId) {
@@ -413,7 +418,7 @@ export class Loupe {
     return null;
   }
 
-  private setUpSequenceNumber() {
+  private setUpSequenceNumber(): void {
     const sequence = this.getSequenceNumber();
 
     if (sequence === -1 && this.storageAvailable) {
@@ -424,7 +429,7 @@ export class Loupe {
     }
   }
 
-  private getNextSequenceNumber() {
+  private getNextSequenceNumber(): number {
     let storedSequenceNumber;
 
     if (this.storageAvailable) {
@@ -453,7 +458,7 @@ export class Loupe {
     return this.sequenceNumber;
   }
 
-  private getSequenceNumber() {
+  private getSequenceNumber(): number {
     if (this.storageAvailable) {
       try {
         const currentNumber = sessionStorage.getItem('LoupeSequenceNumber');
@@ -473,13 +478,14 @@ export class Loupe {
     return -1;
   }
 
-  private setSequenceNumber(sequenceNumber: number) {
+  private setSequenceNumber(sequenceNumber: number): boolean {
     try {
       sessionStorage.setItem('LoupeSequenceNumber', sequenceNumber.toString());
       return true;
     } catch (e) {
       if (this.checkForStorageQuotaReached(e)) {
-        return;
+        this.consoleLog('Unable to store sequence number as storage quote reached: ' + e.message);
+        return false;
       }
 
       this.consoleLog('Unable to store sequence number: ' + e.message);
@@ -497,7 +503,7 @@ export class Loupe {
     exception?: any | null,
     details?: string | null,
     methodSourceInfo?: MethodSourceInfo | null,
-  ) {
+  ): void {
     const messageSequenceNumber = this.getNextSequenceNumber();
     const timeStamp = this.createTimeStamp();
 
@@ -523,7 +529,7 @@ export class Loupe {
     this.storeMessage(message);
   }
 
-  private storeMessage(message: LocalStorageMessage) {
+  private storeMessage(message: LocalStorageMessage): void {
     if (this.storageAvailable && !this.storageFull) {
       try {
         localStorage.setItem('Loupe-message-' + this.generateUUID(), JSON.stringify(message));
@@ -541,38 +547,27 @@ export class Loupe {
     }
   }
 
-  private createExceptionFromError(error: any, cause: string | null) {
+  // TODO - this needs to return Exception
+  private createExceptionFromError(error: any, cause: string | null): any {
     // if error has simply been passed through as a string
     // log the best we could
     if (typeof error === 'string') {
-      return {
-        cause: cause || '',
-        column: null,
-        line: null,
-        message: error,
-        stackTrace: [],
-        url: window.location.href
-      };
+      return new Exception(cause || '', null, null, error, [], this.window.location.href);
     }
 
     // if the object has an Url property
     // its one of our exception objects so just
     // return it
     if ('url' in error) {
+      // TODO - parameter 'error' needs to be strongly typed
       return error;
     }
 
-    return {
-      cause: cause || '',
-      column: error.columnNumber || null,
-      line: error.lineNumber || null,
-      message: error.message,
-      stackTrace: error.stackTrace,
-      url: window.location.href
-    };
+    return new Exception(cause || '', error.columnNumber || null, error.lineNumber || null, 
+      error.message, error.stackTrace, this.window.location.href);
   }
 
-  private createTimeStamp() {
+  private createTimeStamp(): string {
     const now = new Date();
       const tzo = -now.getTimezoneOffset();
       const dif = tzo >= 0 ? '+' : '-';
@@ -602,7 +597,7 @@ export class Loupe {
     );
   }
 
-  private generateUUID() {
+  private generateUUID(): string {
     let d = Date.now();
     const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
       // tslint:disable-next-line: no-bitwise
@@ -614,7 +609,7 @@ export class Loupe {
     return uuid;
   }
 
-  private truncateDetails(storedData: any) {
+  private truncateDetails(storedData: any): any {
     // we know what the normal size of our requests are (about 5k)
     // so the remaining size is most likely to be in the details
     // section which we will truncate
@@ -635,7 +630,7 @@ export class Loupe {
     return storedData;
   }
 
-  private dropMessage(storedData: any) {
+  private dropMessage(storedData: any): void {
     this.removeMessagesFromStorage([storedData.key]);
     const droppedCaption = storedData.message.caption;
     const droppedDescription = storedData.message.description;
@@ -669,7 +664,7 @@ export class Loupe {
     }
   }
 
-  private overSizeMessage(storedData: any) {
+  private overSizeMessage(storedData: any): boolean {
     let messageTooLarge = false;
 
     if (storedData.size > this.maxRequestSize) {
@@ -690,7 +685,7 @@ export class Loupe {
     return messageTooLarge;
   }
 
-  private messageSort(a: any, b: any) {
+  private messageSort(a: any, b: any): number {
     const firstDate = new Date(a.message.timeStamp);
     const secondDate = new Date(b.message.timeStamp);
 
@@ -788,10 +783,11 @@ export class Loupe {
       Array.prototype.push.apply(this.globalKeyList, keys);
     }
 
+    // TODO - strongly type this
     return { messages, keys, moreMessagesInStorage };
   }
 
-  private removeKeysFromGlobalList(keys: string[]) {
+  private removeKeysFromGlobalList(keys: string[]): void {
     // remove these keys from our global key list
     if (this.globalKeyList.length && keys) {
       const position = this.globalKeyList.indexOf(keys[0]);
@@ -799,7 +795,7 @@ export class Loupe {
     }
   }
 
-  private removeMessagesFromStorage(keys: string[]) {
+  private removeMessagesFromStorage(keys: string[]): void {
     if (!keys) {
       return;
     }
@@ -814,7 +810,7 @@ export class Loupe {
   }
 
 
-  private setMessageInterval(callFailed: boolean) {
+  private setMessageInterval(callFailed: boolean): void {
     // on a successful call with standard interval
     // do nothing
     if (!callFailed && this.messageInterval === 10) {
@@ -870,7 +866,7 @@ export class Loupe {
 
   // https://gist.github.com/ca0v/73a31f57b397606c9813472f7493a940
   private debounce = <F extends (...args: any[]) => any>(func: F, waitFor: number) => {
-    let timeout: number = 0;
+    let timeout: any = 0;
 
     const debounced = (...args: any[]) => {
       clearTimeout(timeout);
@@ -880,12 +876,13 @@ export class Loupe {
     return (debounced as unknown) as (...args: Parameters<F>) => ReturnType<F>;
   };
 
-  private logMessageToServer() {
+  private logMessageToServer(): boolean {
+    console.log("logMessageToServer");
     const { messages, keys, moreMessagesInStorage } = this.getMessagesToSend();
 
     // no messages so exit
     if (!messages.length) {
-      return;
+      return false;
     }
 
     const logMessage = {
@@ -898,10 +895,10 @@ export class Loupe {
 
     const updateMessageInterval = this.debounce(this.setMessageInterval, 500);
 
-    this.sendMessageToServer(logMessage, keys, moreMessagesInStorage, updateMessageInterval);
+    return this.sendMessageToServer(logMessage, keys, moreMessagesInStorage, updateMessageInterval);
   }
 
-  private afterRequest(callFailed: boolean, moreMessages: boolean, updateMessageInterval: any) {
+  private afterRequest(callFailed: boolean, moreMessages: boolean, updateMessageInterval: any): void {
     updateMessageInterval(callFailed);
 
     if (this.storageFull && !callFailed) {
@@ -913,27 +910,28 @@ export class Loupe {
     }
   }
 
-  private requestSucceeded(keys: string[], moreMessages: boolean, updateMessageInterval: any) {
+  private requestSucceeded(keys: string[], moreMessages: boolean, updateMessageInterval: any): void {
     this.removeMessagesFromStorage(keys);
     this.afterRequest(false, moreMessages, updateMessageInterval);
   }
 
-  private requestFailed(xhr: any, keys: string[], moreMessages: boolean, updateMessageInterval: any) {
+  private requestFailed(xhr: any, keys: string[], moreMessages: boolean, updateMessageInterval: any): void {
     if (xhr.status === 0 || xhr.status === 401) {
       this.removeKeysFromGlobalList(keys);
     } else {
       this.removeMessagesFromStorage(keys);
     }
 
-    this.consoleLog('Loupe JavaScript Logger: Failed to log to ' + window.location.origin + '/loupe/log');
+    this.consoleLog('Loupe JavaScript Logger: Failed to log to ' + this.window.location.origin + '/loupe/log');
     this.consoleLog('  Status: ' + xhr.status + ': ' + xhr.statusText);
 
     this.afterRequest(true, moreMessages, updateMessageInterval);
   }
 
-  private sendMessageToServer(logMessage: any, keys: string[], moreMessages: boolean, updateMessageInterval: any) {
+  private sendMessageToServer(logMessage: any, keys: string[], moreMessages: boolean, updateMessageInterval: any): boolean {
+    console.log("sendMessageToServer");
     try {
-      let origin = this.corsOrigin || window.location.origin;
+      let origin = this.corsOrigin || this.window.location.origin;
       origin = this.stripTrailingSlash(origin);
 
       const xhr = this.createCORSRequest(origin + '/loupe/log');
@@ -955,18 +953,21 @@ export class Loupe {
         }
       };
 
+      console.log("sendMessageToServer - sending");
       xhr.send(JSON.stringify(logMessage));
+      console.log("sendMessageToServer - sent");
+      return true;
     } catch (e) {
       this.consoleLog('Loupe JavaScript Logger: Exception while attempting to log');
       return false;
     }
   }
 
-  private stripTrailingSlash(origin: string) {
+  private stripTrailingSlash(origin: string): string {
     return origin.replace(/\/$/, '');
   }
 
-  private createCORSRequest(url: string) {
+  private createCORSRequest(url: string): XMLHttpRequest | null {
     if (typeof XMLHttpRequest === 'undefined') {
       return null;
     }
@@ -990,12 +991,12 @@ export class Loupe {
     return xhr;
   }
 
-  private consoleLog(msg: any) {
-    if (typeof window === 'undefined') {
+  private consoleLog(msg: any): void {
+    if (typeof this.window === 'undefined') {
       return;
     }
     
-    const console = window.console;
+    const console = this.window.console;
 
     // tslint:disable: no-console
     if (console && typeof console.log === 'function') {
